@@ -1,57 +1,66 @@
 import express from "express";
-//wrapper around ffmpeg 
-import ffmpeg from "fluent-ffmpeg";
 
-const app = express(); 
+import {
+  uploadProcessedVideo,
+  downloadRawVideo,
+  deleteRawVideo,
+  deleteProcessedVideo,
+  convertVideo,
+  setupDirectories,
+} from "./storage";
+
+// Create the local directories for videos
+setupDirectories();
+
+const app = express();
 app.use(express.json());
 
-
-//route handler 
-//when end point is called
-
-app.post("/process-video", (req, res) =>{
-    //Get path of input video file from the request body
-    const inputFilePath = req.body.inputFilePath;
-    const outputFilePath = req.body.outputFilePath;
-
-    //handling technique
-    if (!inputFilePath || !outputFilePath)
-    {
-        res.status(400).send("Bad Request: Missing file path. ");
-        //400 is client error 
+// Process a video file from Cloud Storage into 360p
+app.post("/process-video", async (req, res) => {
+  // Get the bucket and filename from the Cloud Pub/Sub message
+  let data;
+  try {
+    const message = Buffer.from(req.body.message.data, "base64").toString(
+      "utf8",
+    );
+    data = JSON.parse(message);
+    if (!data.name) {
+      throw new Error("Invalid message payload received.");
     }
+  } catch (error) {
+    console.error(error);
+    return res.status(400).send("Bad Request: missing filename.");
+  }
 
-        //converting video to 360 resolution 
-        ffmpeg(inputFilePath)
-        .outputOptions("-vf", "scale = -1:360")
-        //run either 200 level code or 500 level code 
-        .on("end", () =>{
-            //run this callback function 
+  const inputFileName = data.name;
+  const outputFileName = `processed-${inputFileName}`;
 
-        return res.status(200).send("Processing finished successfully. ")
-    
-        })
-        .on("error", (error) =>{
-            //run another handling
-            console.log(`An error occurred: ${error.message}`);
-            return res.status(500).send(`Internal Server Error ${error.message}`); 
-            //this mean there is some internal error
-            // eg. run out of memory 
-        })
-        //assume that everything works
-        .save(outputFilePath);
-        
+  // Download the raw video from Cloud Storage
+  await downloadRawVideo(inputFileName);
 
+  // Process the video into 360p
+  try {
+    await convertVideo(inputFileName, outputFileName);
+  } catch (err) {
+    await Promise.all([
+      deleteRawVideo(inputFileName),
+      deleteProcessedVideo(outputFileName),
+    ]);
+    return res.status(500).send("Processing failed");
+  }
+
+  // Upload the processed video to Cloud Storage
+  await uploadProcessedVideo(outputFileName);
+
+  await Promise.all([
+    deleteRawVideo(inputFileName),
+    deleteProcessedVideo(outputFileName),
+  ]);
+
+  return res.status(200).send("Processing finished successfully");
 });
 
-
-//launching express app server and logging out message
-//callback function 
-const port = process.env.PORT || 3000; 
-//standard way to provide the port at runtime
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
-    console.log(`Video processing service listening at http://localhost:${port}`);
-})
-
-
-
+  console.log(`Server is running on port ${port}`);
+});
